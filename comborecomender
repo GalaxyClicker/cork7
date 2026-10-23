@@ -1,0 +1,221 @@
+(() => {
+  if (window.__coach) window.__coach.stop();
+
+  // ---------- Innstillinger (lagres i nettleseren) ----------
+  const DEF = {
+    pop: 'Space', spinL: 'KeyA', spinR: 'KeyD',
+    flipBack: 'KeyS', flipFront: 'KeyW',
+    grab1: 'KeyQ', grab2: 'KeyE', mute: 'ShiftLeft',
+    style: 'cork',        // 'cork' (spinn + bakover) eller 'bio' (spinn + fremover)
+    corner: 'tr',         // tr, tl, br, bl
+    scale: 0.6, target: 0.6,
+    notes: true, timer: true, alternate: true
+  };
+  let cfg;
+  try { cfg = { ...DEF, ...JSON.parse(localStorage.getItem('cork7coach') || '{}') }; }
+  catch { cfg = { ...DEF }; }
+  const save = () => { try { localStorage.setItem('cork7coach', JSON.stringify(cfg)); } catch {} };
+
+  const KEYFIELDS = [
+    ['pop', 'Hopp (hold/slipp)'], ['spinL', 'Spinn 1'], ['spinR', 'Spinn 2'],
+    ['flipBack', 'Flip bakover (cork)'], ['flipFront', 'Flip fremover (bio)'],
+    ['grab1', 'Grab 1'], ['grab2', 'Grab 2'], ['mute', 'Mute grab']
+  ];
+
+  // ---------- Hjelpere ----------
+  const norm = c => (c === 'ShiftRight' ? 'ShiftLeft' : c);
+  const label = c => ({ Space: 'SPACE', ArrowLeft: '←', ArrowRight: '→', ArrowUp: '↑', ArrowDown: '↓', ShiftLeft: 'SHIFT' }[c]
+    || c.replace(/^Key|^Digit/, '').replace('Numpad', 'NUM'));
+  const now = () => performance.now();
+  const held = new Map(), history = [];
+  const heldOf = list => list.find(k => held.has(k));
+  const grabKeys = () => [cfg.grab1, cfg.grab2, cfg.mute];
+  const spinKeys = () => [cfg.spinL, cfg.spinR];
+  const flipKeys = () => [cfg.flipBack, cfg.flipFront];
+  const flipKey = () => (cfg.style === 'bio' ? cfg.flipFront : cfg.flipBack);
+  let air = null, lastEvent = 0, raf, panelOpen = false, rebinding = null;
+
+  // ---------- Overlay ----------
+  const box = document.createElement('div');
+  const bar = document.createElement('div');
+  const fill = document.createElement('div');
+  const mark = document.createElement('div');
+  const timeTxt = document.createElement('div');
+  const tips = document.createElement('div');
+  bar.style.cssText = 'display:none;position:relative;width:300px;height:18px;border-radius:9px;' +
+    'background:rgba(10,25,32,.8);border:2px solid #fff;overflow:hidden';
+  fill.style.cssText = 'height:100%;width:0;background:#e8b64a';
+  mark.style.cssText = 'position:absolute;top:0;bottom:0;width:3px;background:#fff';
+  timeTxt.style.cssText = 'display:none;color:#fff;font:700 20px system-ui;text-shadow:0 2px 6px #000';
+  tips.style.cssText = 'display:flex;flex-direction:column;align-items:center;gap:12px';
+  bar.append(fill, mark);
+  box.append(bar, timeTxt, tips);
+  document.body.appendChild(box);
+
+  const applyLayout = () => {
+    const v = cfg.corner[0] === 't' ? 'top:16px;' : 'bottom:16px;';
+    const h = cfg.corner[1] === 'r' ? 'right:16px;' : 'left:16px;';
+    const o = (cfg.corner[0] === 't' ? 'top' : 'bottom') + ' ' + (cfg.corner[1] === 'r' ? 'right' : 'left');
+    box.style.cssText = `position:fixed;${v}${h}transform:scale(${cfg.scale});transform-origin:${o};` +
+      'z-index:2147483646;pointer-events:none;display:flex;flex-direction:column;align-items:center;gap:14px';
+  };
+
+  const cap = k => k === '+'
+    ? '<span style="color:#fff;font:800 36px system-ui;text-shadow:0 2px 6px #000">+</span>'
+    : `<span style="background:#fff;color:#102b35;font:800 48px system-ui;padding:12px 26px;` +
+      `border-radius:14px;box-shadow:0 6px 0 #6fb3c9">${k}</span>`;
+  const row = (keys, note) =>
+    `<div style="display:flex;flex-direction:column;align-items:center;gap:6px">` +
+    `<div style="display:flex;gap:12px;align-items:center">${keys.map(cap).join('')}</div>` +
+    (cfg.notes && note ? `<div style="color:#fff;font:600 17px system-ui;text-shadow:0 2px 6px #000">${note}</div>` : '') +
+    '</div>';
+
+  // ---------- Tilstand ----------
+  const startAir = () => { air = { t0: now(), spin: heldOf(spinKeys()), flip: heldOf(flipKeys()), grabs: new Set() }; };
+  const endAir = () => { history.push({ spin: air.spin }); air = null; };
+
+  const down = e => {
+    if (rebinding) {                       // venter på ny tast i menyen
+      e.preventDefault(); e.stopImmediatePropagation();
+      if (e.code !== 'Escape') {
+        const code = norm(e.code), other = KEYFIELDS.find(([f]) => f !== rebinding && cfg[f] === code);
+        if (other) cfg[other[0]] = cfg[rebinding];          // bytt hvis tasten allerede er i bruk
+        cfg[rebinding] = code; save();
+      }
+      rebinding = null; renderPanel(); return;
+    }
+    if (e.code === 'Digit0' || e.code === 'Numpad0') {
+      if (!e.repeat) { panelOpen = !panelOpen; panel.style.display = panelOpen ? 'block' : 'none'; if (panelOpen) renderPanel(); }
+      return;
+    }
+    if (panelOpen || e.repeat || /INPUT|TEXTAREA/.test(e.target.tagName)) return;
+    const c = norm(e.code);
+    held.set(c, now()); lastEvent = now();
+    if (grabKeys().includes(c)) { if (!air) startAir(); air.grabs.add(c); }
+    if (air && now() - air.t0 < 250) {
+      if (!air.spin && spinKeys().includes(c)) air.spin = c;
+      if (!air.flip && flipKeys().includes(c)) air.flip = c;
+    }
+  };
+  const up = e => {
+    const c = norm(e.code);
+    held.delete(c); lastEvent = now();
+    if (c === cfg.pop && !air && !panelOpen) startAir();
+  };
+  addEventListener('keydown', down, true);
+  addEventListener('keyup', up, true);
+
+  const nextSpin = () => {
+    if (!cfg.alternate) return cfg.spinL;
+    const last = history[history.length - 1];
+    return last && last.spin === cfg.spinL ? cfg.spinR : cfg.spinL;
+  };
+
+  // ---------- Tips (skannes hvert 0,2 s) ----------
+  const rows = () => {
+    const spin = label(nextSpin()), flip = label(flipKey());
+    if (!air) return [row([label(cfg.pop)], 'hold og slipp ved lippen'), row([spin, '+', flip], cfg.style)];
+    const t = now() - air.t0, out = [];
+    if (t > 1800) return [row(['SLIPP'], 'åpne opp og land rett')];
+    if (t < 250) {
+      if (!air.spin && !air.flip) out.push(row([spin, '+', flip], 'spinn + flip nå'));
+      else if (air.spin && !air.flip) out.push(row([flip], 'legg til flip nå'));
+      else if (air.flip && !air.spin) out.push(row([spin], 'legg til spinn nå'));
+    }
+    const g = heldOf(grabKeys());
+    if (!air.grabs.size) out.push(row([label(cfg.grab1)], 'ta en grab'));
+    else if (g && now() - held.get(g) < 1000) out.push(row(['HOLD', label(g)], 'hold i 1 sekund'));
+    else if (air.grabs.size < 2) out.push(row([label(air.grabs.has(cfg.grab1) ? cfg.grab2 : cfg.grab1)], 'ny grab gir ×1,3'));
+    return out.length ? out : [row(['✔'], 'bra, vent på landing')];
+  };
+
+  const tick = () => {
+    if (air) {
+      const t = now();
+      if (t - air.t0 > 4500 || (t - air.t0 > 1500 && !heldOf([...spinKeys(), ...flipKeys(), ...grabKeys()]) && t - lastEvent > 1000)) endAir();
+    }
+    tips.innerHTML = panelOpen ? '' : rows().join('');
+  };
+  const timer = setInterval(tick, 200);
+
+  // ---------- Space-timer ----------
+  const frame = () => {
+    if (cfg.timer && !panelOpen && held.has(cfg.pop) && !air) {
+      const s = (now() - held.get(cfg.pop)) / 1000, max = cfg.target * 1.6;
+      bar.style.display = 'block'; timeTxt.style.display = 'block';
+      fill.style.width = Math.min(s / max, 1) * 100 + '%';
+      fill.style.background = s >= cfg.target ? '#4ade80' : '#e8b64a';
+      mark.style.left = (cfg.target / max) * 100 + '%';
+      timeTxt.textContent = s >= cfg.target ? `${s.toFixed(1)} s – SLIPP!` : `${s.toFixed(1)} s`;
+    } else { bar.style.display = 'none'; timeTxt.style.display = 'none'; }
+    raf = requestAnimationFrame(frame);
+  };
+
+  // ---------- Innstillingsmeny (åpnes med 0) ----------
+  const panel = document.createElement('div');
+  panel.style.cssText = 'display:none;position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);' +
+    'z-index:2147483647;width:340px;max-height:86vh;overflow:auto;box-sizing:border-box;padding:16px 18px;' +
+    'background:rgba(10,25,32,.96);color:#e8f4f8;font:14px system-ui;border:1px solid #2f6b80;border-radius:14px;' +
+    'box-shadow:0 10px 40px rgba(0,0,0,.6)';
+  document.body.appendChild(panel);
+
+  const S = {
+    row: 'display:flex;justify-content:space-between;align-items:center;gap:10px;margin:7px 0',
+    btn: 'background:#183a47;color:#fff;border:1px solid #2f6b80;border-radius:8px;padding:5px 12px;' +
+      'font:700 13px system-ui;cursor:pointer;min-width:74px',
+    on: 'background:#e8b64a;color:#102b35;border-color:#e8b64a'
+  };
+  const btn = (id, text, active) => `<button data-id="${id}" style="${S.btn};${active ? S.on : ''}">${text}</button>`;
+
+  function renderPanel() {
+    panel.innerHTML =
+      `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">` +
+      `<b style="font-size:16px">Cork7 Coach</b><span style="opacity:.6;font-size:12px">0 = lukk</span></div>` +
+      `<div style="opacity:.7;font-size:12px;margin-bottom:6px">Klikk en knapp, og trykk så tasten du bruker i spillet.</div>` +
+      KEYFIELDS.map(([f, name]) =>
+        `<div style="${S.row}"><span>${name}</span>${btn('k:' + f, rebinding === f ? 'trykk tast…' : label(cfg[f]), rebinding === f)}</div>`).join('') +
+      `<hr style="border:0;border-top:1px solid #2f6b80;margin:12px 0">` +
+      `<div style="${S.row}"><span>Trikstil</span><span>${btn('style:cork', 'Cork', cfg.style === 'cork')} ${btn('style:bio', 'Bio', cfg.style === 'bio')}</span></div>` +
+      `<div style="${S.row}"><span>Bytt spinneretning</span>${btn('t:alternate', cfg.alternate ? 'På' : 'Av', cfg.alternate)}</div>` +
+      `<div style="${S.row}"><span>Hjelpetekst</span>${btn('t:notes', cfg.notes ? 'På' : 'Av', cfg.notes)}</div>` +
+      `<div style="${S.row}"><span>Space-timer</span>${btn('t:timer', cfg.timer ? 'På' : 'Av', cfg.timer)}</div>` +
+      `<div style="${S.row}"><span>Slipp etter</span><span><input data-id="r:target" type="range" min="0.2" max="2" step="0.05" value="${cfg.target}" style="width:110px"> <b id="c7t">${cfg.target.toFixed(2)} s</b></span></div>` +
+      `<div style="${S.row}"><span>Størrelse</span><span><input data-id="r:scale" type="range" min="0.3" max="1.2" step="0.05" value="${cfg.scale}" style="width:110px"> <b id="c7s">${Math.round(cfg.scale * 100)} %</b></span></div>` +
+      `<div style="${S.row}"><span>Plassering</span><span>` +
+      [['tl', '↖'], ['tr', '↗'], ['bl', '↙'], ['br', '↘']].map(([c, a]) => btn('c:' + c, a, cfg.corner === c)).join(' ') + `</span></div>` +
+      `<div style="${S.row};margin-top:14px">${btn('reset', 'Nullstill')}${btn('close', 'Lukk')}</div>`;
+  }
+
+  panel.addEventListener('click', e => {
+    const id = e.target.dataset && e.target.dataset.id;
+    if (!id) return;
+    const [kind, val] = id.split(':');
+    if (kind === 'k') rebinding = val;
+    else if (kind === 'style') cfg.style = val;
+    else if (kind === 't') cfg[val] = !cfg[val];
+    else if (kind === 'c') cfg.corner = val;
+    else if (id === 'reset') cfg = { ...DEF };
+    else if (id === 'close') { panelOpen = false; panel.style.display = 'none'; }
+    save(); applyLayout(); if (panelOpen) renderPanel();
+  });
+  panel.addEventListener('input', e => {
+    const id = e.target.dataset && e.target.dataset.id;
+    if (id === 'r:target') { cfg.target = +e.target.value; panel.querySelector('#c7t').textContent = cfg.target.toFixed(2) + ' s'; }
+    if (id === 'r:scale') { cfg.scale = +e.target.value; panel.querySelector('#c7s').textContent = Math.round(cfg.scale * 100) + ' %'; applyLayout(); }
+    save();
+  });
+
+  applyLayout();
+  frame();
+
+  window.__coach = {
+    get cfg() { return cfg; },
+    stop() {
+      clearInterval(timer); cancelAnimationFrame(raf); box.remove(); panel.remove();
+      removeEventListener('keydown', down, true);
+      removeEventListener('keyup', up, true);
+      delete window.__coach;
+    }
+  };
+  console.log('Coach kjører. Trykk 0 for innstillinger, __coach.stop() for å stoppe.');
+})();
